@@ -9,21 +9,22 @@
 #include <time.h>
 
 // ==================== КОНСТАНТЫ КАРТЫ ====================
-#define MAP_WIDTH 40
-#define MAP_HEIGHT 40
+#define MAP_WIDTH 60
+#define MAP_HEIGHT 60
 #define FLOOR_HEIGHT 1.0f
 #define WALL_HEIGHT 4.0f
 #define MAX_HEIGHT_DIFF 1
-#define MAX_PATH_LENGTH 100
-#define HEIGHT_STEP 1.0f
+#define MAX_PATH_LENGTH 200
 
 // ==================== КОНСТАНТЫ ГЕНЕРАЦИИ ====================
 #define ROOM_GEN_MIN_SIZE 5
-#define ROOM_GEN_MAX_SIZE 11      // 5 + rand() % 7
-#define ROOM_GEN_COUNT 5          // Количество комнат
-#define ROOM_GEN_MAX_ATTEMPTS 20  // Попыток разместить комнату
-#define ROOM_GEN_PADDING 2        // Минимальный отступ между комнатами
+#define ROOM_GEN_MAX_SIZE 11
+#define ROOM_GEN_COUNT 8          // Увеличили количество комнат
+#define ROOM_GEN_MAX_ATTEMPTS 30
+#define ROOM_GEN_PADDING 4        // Увеличили отступ между комнатами
 #define MAX_ROOMS 20
+#define MAX_CONNECTIONS_PER_ROOM 4  // Максимум коридоров на комнату
+#define MIN_ENTRANCE_DISTANCE 3    // Минимальное расстояние между входами
 
 // Типы тайлов
 #define TILE_EMPTY 0
@@ -46,6 +47,7 @@
 #define PLAYER_MOVE_SPEED 4.0f
 #define PLAYER_SPRITE_WIDTH 48
 #define PLAYER_SPRITE_HEIGHT 64
+#define HEIGHT_STEP 1.0f
 
 // ==================== НАПРАВЛЕНИЯ ДВИЖЕНИЯ ====================
 typedef enum {
@@ -90,9 +92,11 @@ typedef struct {
 } Path;
 
 typedef struct {
-  int x, z;          // Верхний левый угол
+  int x, z;
   int width, height;
   int centerX, centerZ;
+  int connections;  // Количество коридоров, подключенных к этой комнате
+  Point entrances[MAX_CONNECTIONS_PER_ROOM];  // Точки входа коридоров
 } Room;
 
 Room rooms[MAX_ROOMS];
@@ -108,6 +112,13 @@ float playerX = PLAYER_START_X;
 float playerZ = PLAYER_START_Z;
 
 // ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+// ==================== РАССТОЯНИЕ МЕЖДУ КОМНАТАМИ ====================
+float distanceBetweenRooms(Room *a, Room *b) {
+  int dx = a->centerX - b->centerX;
+  int dz = a->centerZ - b->centerZ;
+  return sqrtf((float)(dx * dx + dz * dz));
+}
+
 float heuristic(Point a, Point b) {
   int dx = abs(a.x - b.x);
   int dz = abs(a.z - b.z);
@@ -268,6 +279,48 @@ void initMap() {
   }
 }
 
+// ==================== ПОИСК КОМНАТЫ ПО ТОЧКЕ ====================
+int findRoomAtPoint(int x, int z) {
+  for (int i = 0; i < roomCount; i++) {
+    Room *r = &rooms[i];
+    if (x >= r->x && x < r->x + r->width &&
+        z >= r->z && z < r->z + r->height) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// ==================== ПРОВЕРКА ВОЗМОЖНОСТИ ПОДКЛЮЧЕНИЯ ====================
+bool canConnectRoom(int roomIndex, Point entrance) {
+  Room *r = &rooms[roomIndex];
+
+  // Проверяем лимит подключений
+  if (r->connections >= MAX_CONNECTIONS_PER_ROOM) {
+    return false;
+  }
+
+  // Проверяем расстояние до существующих входов
+  for (int i = 0; i < r->connections; i++) {
+    int dx = abs(r->entrances[i].x - entrance.x);
+    int dz = abs(r->entrances[i].z - entrance.z);
+    if (dx + dz < MIN_ENTRANCE_DISTANCE) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// ==================== РЕГИСТРАЦИЯ ВХОДА В КОМНАТУ ====================
+void registerEntrance(int roomIndex, Point entrance) {
+  Room *r = &rooms[roomIndex];
+  if (r->connections < MAX_CONNECTIONS_PER_ROOM) {
+    r->entrances[r->connections] = entrance;
+    r->connections++;
+  }
+}
+
 // ==================== ПРОВЕРКА ПЕРЕСЕЧЕНИЯ КОМНАТ ====================
 bool roomOverlaps(Room newRoom) {
   for (int i = 0; i < roomCount; i++) {
@@ -285,11 +338,45 @@ bool roomOverlaps(Room newRoom) {
 
 // ==================== СОЗДАНИЕ КОРИДОРА МЕЖДУ ДВУМЯ ТОЧКАМИ ====================
 void carveCorridor(int x1, int z1, int x2, int z2) {
+  // Определяем, где коридор входит в комнаты
+  int room1 = findRoomAtPoint(x1, z1);
+  int room2 = findRoomAtPoint(x2, z2);
+
+  // Находим точки входа (границы комнат)
+  Point entrance1 = {x1, z1};
+  Point entrance2 = {x2, z2};
+
+  if (room1 >= 0) {
+    Room *r = &rooms[room1];
+    // Находим ближайшую стену к центру
+    int dx = x2 - x1;
+    int dz = z2 - z1;
+
+    if (abs(dx) > abs(dz)) {
+      // Двигаемся преимущественно по X
+      entrance1.x = (dx > 0) ? r->x + r->width - 1 : r->x;
+    } else {
+      // Двигаемся преимущественно по Z
+      entrance1.z = (dz > 0) ? r->z + r->height - 1 : r->z;
+    }
+  }
+
+  if (room2 >= 0) {
+    Room *r = &rooms[room2];
+    int dx = x1 - x2;
+    int dz = z1 - z2;
+
+    if (abs(dx) > abs(dz)) {
+      entrance2.x = (dx > 0) ? r->x + r->width - 1 : r->x;
+    } else {
+      entrance2.z = (dz > 0) ? r->z + r->height - 1 : r->z;
+    }
+  }
+
+  // Рисуем коридор
   if (rand() % 2 == 0) {
-    // Горизонтальный участок, потом вертикальный
     for (int x = x1; x != x2; x += (x2 > x1) ? 1 : -1) {
       if (x >= 0 && x < MAP_WIDTH && z1 >= 0 && z1 < MAP_HEIGHT) {
-        // Заменяем стену на пол (создаем проход)
         if (heightMap[x][z1] == TILE_WALL || heightMap[x][z1] == TILE_EMPTY) {
           heightMap[x][z1] = TILE_FLOOR;
         }
@@ -303,7 +390,6 @@ void carveCorridor(int x1, int z1, int x2, int z2) {
       }
     }
   } else {
-    // Вертикальный участок, потом горизонтальный
     for (int z = z1; z != z2; z += (z2 > z1) ? 1 : -1) {
       if (x1 >= 0 && x1 < MAP_WIDTH && z >= 0 && z < MAP_HEIGHT) {
         if (heightMap[x1][z] == TILE_WALL || heightMap[x1][z] == TILE_EMPTY) {
@@ -319,7 +405,6 @@ void carveCorridor(int x1, int z1, int x2, int z2) {
       }
     }
   }
-  // Финальная клетка
   if (x2 >= 0 && x2 < MAP_WIDTH && z2 >= 0 && z2 < MAP_HEIGHT) {
     if (heightMap[x2][z2] == TILE_WALL || heightMap[x2][z2] == TILE_EMPTY) {
       heightMap[x2][z2] = TILE_FLOOR;
@@ -327,28 +412,28 @@ void carveCorridor(int x1, int z1, int x2, int z2) {
   }
 }
 
-// ==================== ГЕНЕРАЦИЯ ПОДЗЕМЕЛЬЯ ====================
+// ==================== ГЕНЕРАЦИЯ ПОДЗЕМЕЛЬЯ (MST) ====================
 void generateDungeon() {
   initMap();
   roomCount = 0;
 
-  // Генерируем комнаты
+  // === ЭТАП 1: Генерация комнат ===
   for (int i = 0; i < ROOM_GEN_COUNT; i++) {
-    Room newRoom;
+    Room newRoom = {0};
     newRoom.width = ROOM_GEN_MIN_SIZE + rand() % (ROOM_GEN_MAX_SIZE - ROOM_GEN_MIN_SIZE + 1);
     newRoom.height = ROOM_GEN_MIN_SIZE + rand() % (ROOM_GEN_MAX_SIZE - ROOM_GEN_MIN_SIZE + 1);
 
-    // Проверяем, что комната помещается на карте
-    if (newRoom.width >= MAP_WIDTH - 4 || newRoom.height >= MAP_HEIGHT - 4) {
+    if (newRoom.width >= MAP_WIDTH - 8 || newRoom.height >= MAP_HEIGHT - 8) {
       continue;
     }
 
     bool placed = false;
     for (int attempt = 0; attempt < ROOM_GEN_MAX_ATTEMPTS; attempt++) {
-      newRoom.x = 1 + rand() % (MAP_WIDTH - newRoom.width - 2);
-      newRoom.z = 1 + rand() % (MAP_HEIGHT - newRoom.height - 2);
+      newRoom.x = 2 + rand() % (MAP_WIDTH - newRoom.width - 4);
+      newRoom.z = 2 + rand() % (MAP_HEIGHT - newRoom.height - 4);
       newRoom.centerX = newRoom.x + newRoom.width / 2;
       newRoom.centerZ = newRoom.z + newRoom.height / 2;
+      newRoom.connections = 0;
 
       if (!roomOverlaps(newRoom)) {
         placed = true;
@@ -357,7 +442,6 @@ void generateDungeon() {
     }
 
     if (placed) {
-      // Вырезаем комнату в карте
       for (int x = newRoom.x; x < newRoom.x + newRoom.width; x++) {
         for (int z = newRoom.z; z < newRoom.z + newRoom.height; z++) {
           if (x < 0 || x >= MAP_WIDTH || z < 0 || z >= MAP_HEIGHT) continue;
@@ -374,22 +458,79 @@ void generateDungeon() {
     }
   }
 
-  // Соединяем комнаты коридорами
-  for (int i = 1; i < roomCount; i++) {
-    carveCorridor(
-      rooms[i - 1].centerX, rooms[i - 1].centerZ,
-      rooms[i].centerX, rooms[i].centerZ
-    );
+  if (roomCount < 2) {
+    playerX = MAP_WIDTH / 2.0f;
+    playerZ = MAP_HEIGHT / 2.0f;
+    return;
+  }
+
+  // === ЭТАП 2: Построение минимального остовного дерева (алгоритм Прима) ===
+  // Это гарантирует, что ВСЕ комнаты будут связаны коридорами
+  bool inMST[MAX_ROOMS] = {false};
+  inMST[0] = true;  // Начинаем с первой комнаты
+  int mstCount = 1;
+
+  while (mstCount < roomCount) {
+    float bestDist = 999999.0f;
+    int bestFrom = -1;
+    int bestTo = -1;
+
+    // Ищем ближайшую пару (связанная ↔ несвязанная)
+    for (int i = 0; i < roomCount; i++) {
+      if (!inMST[i]) continue;
+      for (int j = 0; j < roomCount; j++) {
+        if (inMST[j]) continue;
+
+        float dist = distanceBetweenRooms(&rooms[i], &rooms[j]);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestFrom = i;
+          bestTo = j;
+        }
+      }
+    }
+
+    if (bestFrom == -1 || bestTo == -1) break;  // На случай ошибок
+
+    // Строим коридор между найденными комнатами
+    Room *rA = &rooms[bestFrom];
+    Room *rB = &rooms[bestTo];
+
+    if (rA->connections < MAX_CONNECTIONS_PER_ROOM &&
+        rB->connections < MAX_CONNECTIONS_PER_ROOM) {
+      carveCorridor(rA->centerX, rA->centerZ, rB->centerX, rB->centerZ);
+      rA->connections++;
+      rB->connections++;
+    }
+
+    inMST[bestTo] = true;
+    mstCount++;
+  }
+
+  // === ЭТАП 3: Добавляем несколько случайных коридоров для циклов ===
+  // Это делает подземелье интереснее (несколько путей между комнатами)
+  int extraCorridors = roomCount / 2;
+  for (int attempt = 0; attempt < extraCorridors * 3 && extraCorridors > 0; attempt++) {
+    int roomA = rand() % roomCount;
+    int roomB = rand() % roomCount;
+
+    if (roomA == roomB) continue;
+
+    Room *rA = &rooms[roomA];
+    Room *rB = &rooms[roomB];
+
+    if (rA->connections < MAX_CONNECTIONS_PER_ROOM &&
+        rB->connections < MAX_CONNECTIONS_PER_ROOM) {
+      carveCorridor(rA->centerX, rA->centerZ, rB->centerX, rB->centerZ);
+      rA->connections++;
+      rB->connections++;
+      extraCorridors--;
+    }
   }
 
   // Ставим игрока в центр первой комнаты
-  if (roomCount > 0) {
-    playerX = (float)rooms[0].centerX;
-    playerZ = (float)rooms[0].centerZ;
-  } else {
-    playerX = MAP_WIDTH / 2.0f;
-    playerZ = MAP_HEIGHT / 2.0f;
-  }
+  playerX = (float)rooms[0].centerX;
+  playerZ = (float)rooms[0].centerZ;
 }
 
 // ==================== ОБНОВЛЕНИЕ КАМЕРЫ ====================
