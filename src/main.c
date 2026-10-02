@@ -11,10 +11,23 @@
 // ==================== КОНСТАНТЫ КАРТЫ ====================
 #define MAP_WIDTH 60
 #define MAP_HEIGHT 60
-#define FLOOR_HEIGHT 1.0f
-#define WALL_HEIGHT 4.0f
+#define FLOOR_HEIGHT 3.0f      // Пол на высоте 3
+#define WALL_HEIGHT 7.0f       // Стены на высоте 7
 #define MAX_HEIGHT_DIFF 1
 #define MAX_PATH_LENGTH 200
+
+// Типы тайлов (высота в world units)
+#define TILE_EMPTY 0           // Пропасть
+#define TILE_FLOOR 3           // Пол (высота 3)
+#define TILE_WALL 7            // Стена (высота 7)
+
+// Типы комнат
+#define ROOM_TYPE_NORMAL 0     // Обычная комната со стенами
+#define ROOM_TYPE_PILLAR 1     // Комната без стен (платформа)
+
+// Типы коридоров
+#define CORRIDOR_TYPE_WALL 0   // Коридор внутри "здания" (вырезан из стен)
+#define CORRIDOR_TYPE_BRIDGE 1 // Мост над пропастью
 
 // ==================== КОНСТАНТЫ ГЕНЕРАЦИИ ====================
 #define ROOM_GEN_MIN_SIZE 5
@@ -25,11 +38,6 @@
 #define MAX_ROOMS 20
 #define MAX_CONNECTIONS_PER_ROOM 4  // Максимум коридоров на комнату
 #define MIN_ENTRANCE_DISTANCE 3    // Минимальное расстояние между входами
-
-// Типы тайлов
-#define TILE_EMPTY 0
-#define TILE_FLOOR 1
-#define TILE_WALL 4
 
 // ==================== КОНСТАНТЫ КАМЕРЫ ====================
 #define CAMERA_RADIUS 8.0f
@@ -44,10 +52,9 @@
 // ==================== КОНСТАНТЫ ИГРОКА ====================
 #define PLAYER_START_X 6.0f
 #define PLAYER_START_Z 6.0f
-#define PLAYER_MOVE_SPEED 4.0f
+#define PLAYER_MOVE_SPEED 10.0f
 #define PLAYER_SPRITE_WIDTH 48
 #define PLAYER_SPRITE_HEIGHT 64
-#define HEIGHT_STEP 1.0f
 
 // ==================== НАПРАВЛЕНИЯ ДВИЖЕНИЯ ====================
 typedef enum {
@@ -95,8 +102,9 @@ typedef struct {
   int x, z;
   int width, height;
   int centerX, centerZ;
-  int connections;  // Количество коридоров, подключенных к этой комнате
-  Point entrances[MAX_CONNECTIONS_PER_ROOM];  // Точки входа коридоров
+  int connections;
+  Point entrances[MAX_CONNECTIONS_PER_ROOM];
+  int type;  // ROOM_TYPE_NORMAL или ROOM_TYPE_PILLAR
 } Room;
 
 Room rooms[MAX_ROOMS];
@@ -110,6 +118,8 @@ float cameraAngle = CAMERA_INITIAL_ANGLE;
 float cameraFovy = CAMERA_FOVY_INITIAL;  // Новая переменная
 float playerX = PLAYER_START_X;
 float playerZ = PLAYER_START_Z;
+// Зоны: true = область со стенами (здание), false = пропасть
+bool wallZone[MAP_WIDTH][MAP_HEIGHT] = {false};
 
 // ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 // ==================== РАССТОЯНИЕ МЕЖДУ КОМНАТАМИ ====================
@@ -252,9 +262,10 @@ Point screenToGrid(Vector2 screenPos, Camera3D camera) {
 
   for (int x = 0; x < MAP_WIDTH; x++) {
     for (int z = 0; z < MAP_HEIGHT; z++) {
-      if (heightMap[x][z] == 0) continue;
+      if (heightMap[x][z] == TILE_EMPTY) continue;
 
-      float tileY = (float)heightMap[x][z] * HEIGHT_STEP;
+      // ИСПРАВЛЕНО: heightMap уже содержит высоту
+      float tileY = (float)heightMap[x][z];
       Vector3 tilePos = {(float)x, tileY, (float)z};
       Vector2 tileScreen = GetWorldToScreen(tilePos, camera);
 
@@ -268,6 +279,27 @@ Point screenToGrid(Vector2 screenPos, Camera3D camera) {
   }
 
   return result;
+}
+
+// ==================== ИНИЦИАЛИЗАЦИЯ ЗОН ====================
+void initZones() {
+  for (int x = 0; x < MAP_WIDTH; x++) {
+    for (int z = 0; z < MAP_HEIGHT; z++) {
+      wallZone[x][z] = false;
+    }
+  }
+
+  // Область стен в центре карты (40-55% размера)
+  int zoneWidth = MAP_WIDTH * 2 / 5 + rand() % (MAP_WIDTH / 6);
+  int zoneHeight = MAP_HEIGHT * 2 / 5 + rand() % (MAP_HEIGHT / 6);
+  int zoneX = (MAP_WIDTH - zoneWidth) / 2;
+  int zoneZ = (MAP_HEIGHT - zoneHeight) / 2;
+
+  for (int x = zoneX; x < zoneX + zoneWidth && x < MAP_WIDTH; x++) {
+    for (int z = zoneZ; z < zoneZ + zoneHeight && z < MAP_HEIGHT; z++) {
+      wallZone[x][z] = true;
+    }
+  }
 }
 
 // ==================== ИНИЦИАЛИЗАЦИЯ КАРТЫ ====================
@@ -336,92 +368,72 @@ bool roomOverlaps(Room newRoom) {
   return false;
 }
 
-// ==================== СОЗДАНИЕ КОРИДОРА МЕЖДУ ДВУМЯ ТОЧКАМИ ====================
+// ==================== СОЗДАНИЕ КОРИДОРА ====================
 void carveCorridor(int x1, int z1, int x2, int z2) {
-  // Определяем, где коридор входит в комнаты
-  int room1 = findRoomAtPoint(x1, z1);
-  int room2 = findRoomAtPoint(x2, z2);
-
-  // Находим точки входа (границы комнат)
-  Point entrance1 = {x1, z1};
-  Point entrance2 = {x2, z2};
-
-  if (room1 >= 0) {
-    Room *r = &rooms[room1];
-    // Находим ближайшую стену к центру
-    int dx = x2 - x1;
-    int dz = z2 - z1;
-
-    if (abs(dx) > abs(dz)) {
-      // Двигаемся преимущественно по X
-      entrance1.x = (dx > 0) ? r->x + r->width - 1 : r->x;
-    } else {
-      // Двигаемся преимущественно по Z
-      entrance1.z = (dz > 0) ? r->z + r->height - 1 : r->z;
-    }
-  }
-
-  if (room2 >= 0) {
-    Room *r = &rooms[room2];
-    int dx = x1 - x2;
-    int dz = z1 - z2;
-
-    if (abs(dx) > abs(dz)) {
-      entrance2.x = (dx > 0) ? r->x + r->width - 1 : r->x;
-    } else {
-      entrance2.z = (dz > 0) ? r->z + r->height - 1 : r->z;
-    }
-  }
-
-  // Рисуем коридор
   if (rand() % 2 == 0) {
-    for (int x = x1; x != x2; x += (x2 > x1) ? 1 : -1) {
+    // Горизонтально, потом вертикально
+    int stepX = (x2 > x1) ? 1 : -1;
+    for (int x = x1; x != x2 + stepX; x += stepX) {
       if (x >= 0 && x < MAP_WIDTH && z1 >= 0 && z1 < MAP_HEIGHT) {
-        if (heightMap[x][z1] == TILE_WALL || heightMap[x][z1] == TILE_EMPTY) {
+        if (heightMap[x][z1] != TILE_FLOOR) {
           heightMap[x][z1] = TILE_FLOOR;
         }
       }
     }
-    for (int z = z1; z != z2; z += (z2 > z1) ? 1 : -1) {
+    int stepZ = (z2 > z1) ? 1 : -1;
+    for (int z = z1; z != z2 + stepZ; z += stepZ) {
       if (x2 >= 0 && x2 < MAP_WIDTH && z >= 0 && z < MAP_HEIGHT) {
-        if (heightMap[x2][z] == TILE_WALL || heightMap[x2][z] == TILE_EMPTY) {
+        if (heightMap[x2][z] != TILE_FLOOR) {
           heightMap[x2][z] = TILE_FLOOR;
         }
       }
     }
   } else {
-    for (int z = z1; z != z2; z += (z2 > z1) ? 1 : -1) {
+    // Вертикально, потом горизонтально
+    int stepZ = (z2 > z1) ? 1 : -1;
+    for (int z = z1; z != z2 + stepZ; z += stepZ) {
       if (x1 >= 0 && x1 < MAP_WIDTH && z >= 0 && z < MAP_HEIGHT) {
-        if (heightMap[x1][z] == TILE_WALL || heightMap[x1][z] == TILE_EMPTY) {
+        if (heightMap[x1][z] != TILE_FLOOR) {
           heightMap[x1][z] = TILE_FLOOR;
         }
       }
     }
-    for (int x = x1; x != x2; x += (x2 > x1) ? 1 : -1) {
+    int stepX = (x2 > x1) ? 1 : -1;
+    for (int x = x1; x != x2 + stepX; x += stepX) {
       if (x >= 0 && x < MAP_WIDTH && z2 >= 0 && z2 < MAP_HEIGHT) {
-        if (heightMap[x][z2] == TILE_WALL || heightMap[x][z2] == TILE_EMPTY) {
+        if (heightMap[x][z2] != TILE_FLOOR) {
           heightMap[x][z2] = TILE_FLOOR;
         }
       }
     }
   }
-  if (x2 >= 0 && x2 < MAP_WIDTH && z2 >= 0 && z2 < MAP_HEIGHT) {
-    if (heightMap[x2][z2] == TILE_WALL || heightMap[x2][z2] == TILE_EMPTY) {
-      heightMap[x2][z2] = TILE_FLOOR;
-    }
-  }
 }
 
-// ==================== ГЕНЕРАЦИЯ ПОДЗЕМЕЛЬЯ (MST) ====================
+// ==================== ГЕНЕРАЦИЯ ПОДЗЕМЕЛЬЯ ====================
 void generateDungeon() {
   initMap();
+  initZones();
   roomCount = 0;
 
-  // === ЭТАП 1: Генерация комнат ===
+  // === ЭТАП 1: Заполняем зоны стенами ===
+  for (int x = 0; x < MAP_WIDTH; x++) {
+    for (int z = 0; z < MAP_HEIGHT; z++) {
+      if (wallZone[x][z]) {
+        heightMap[x][z] = TILE_WALL;
+      } else {
+        heightMap[x][z] = TILE_EMPTY;
+      }
+    }
+  }
+
+  // === ЭТАП 2: Генерация комнат ===
   for (int i = 0; i < ROOM_GEN_COUNT; i++) {
     Room newRoom = {0};
     newRoom.width = ROOM_GEN_MIN_SIZE + rand() % (ROOM_GEN_MAX_SIZE - ROOM_GEN_MIN_SIZE + 1);
     newRoom.height = ROOM_GEN_MIN_SIZE + rand() % (ROOM_GEN_MAX_SIZE - ROOM_GEN_MIN_SIZE + 1);
+
+    // Случайно выбираем тип комнаты
+    newRoom.type = (rand() % 2 == 0) ? ROOM_TYPE_NORMAL : ROOM_TYPE_PILLAR;
 
     if (newRoom.width >= MAP_WIDTH - 8 || newRoom.height >= MAP_HEIGHT - 8) {
       continue;
@@ -442,14 +454,27 @@ void generateDungeon() {
     }
 
     if (placed) {
-      for (int x = newRoom.x; x < newRoom.x + newRoom.width; x++) {
-        for (int z = newRoom.z; z < newRoom.z + newRoom.height; z++) {
-          if (x < 0 || x >= MAP_WIDTH || z < 0 || z >= MAP_HEIGHT) continue;
+      if (newRoom.type == ROOM_TYPE_NORMAL) {
+        // Обычная комната: вырезаем из стен
+        for (int x = newRoom.x; x < newRoom.x + newRoom.width; x++) {
+          for (int z = newRoom.z; z < newRoom.z + newRoom.height; z++) {
+            if (x < 0 || x >= MAP_WIDTH || z < 0 || z >= MAP_HEIGHT) continue;
 
-          if (x == newRoom.x || x == newRoom.x + newRoom.width - 1 ||
-              z == newRoom.z || z == newRoom.z + newRoom.height - 1) {
-            heightMap[x][z] = TILE_WALL;
-          } else {
+            if (x == newRoom.x || x == newRoom.x + newRoom.width - 1 ||
+                z == newRoom.z || z == newRoom.z + newRoom.height - 1) {
+              // Стены остаются
+              heightMap[x][z] = TILE_WALL;
+            } else {
+              // Пол внутри
+              heightMap[x][z] = TILE_FLOOR;
+            }
+          }
+        }
+      } else {
+        // Комната-платформа: просто пол без стен
+        for (int x = newRoom.x; x < newRoom.x + newRoom.width; x++) {
+          for (int z = newRoom.z; z < newRoom.z + newRoom.height; z++) {
+            if (x < 0 || x >= MAP_WIDTH || z < 0 || z >= MAP_HEIGHT) continue;
             heightMap[x][z] = TILE_FLOOR;
           }
         }
@@ -464,10 +489,9 @@ void generateDungeon() {
     return;
   }
 
-  // === ЭТАП 2: Построение минимального остовного дерева (алгоритм Прима) ===
-  // Это гарантирует, что ВСЕ комнаты будут связаны коридорами
+  // === ЭТАП 3: MST для связности ===
   bool inMST[MAX_ROOMS] = {false};
-  inMST[0] = true;  // Начинаем с первой комнаты
+  inMST[0] = true;
   int mstCount = 1;
 
   while (mstCount < roomCount) {
@@ -475,7 +499,6 @@ void generateDungeon() {
     int bestFrom = -1;
     int bestTo = -1;
 
-    // Ищем ближайшую пару (связанная ↔ несвязанная)
     for (int i = 0; i < roomCount; i++) {
       if (!inMST[i]) continue;
       for (int j = 0; j < roomCount; j++) {
@@ -490,9 +513,8 @@ void generateDungeon() {
       }
     }
 
-    if (bestFrom == -1 || bestTo == -1) break;  // На случай ошибок
+    if (bestFrom == -1 || bestTo == -1) break;
 
-    // Строим коридор между найденными комнатами
     Room *rA = &rooms[bestFrom];
     Room *rB = &rooms[bestTo];
 
@@ -507,8 +529,7 @@ void generateDungeon() {
     mstCount++;
   }
 
-  // === ЭТАП 3: Добавляем несколько случайных коридоров для циклов ===
-  // Это делает подземелье интереснее (несколько путей между комнатами)
+  // === ЭТАП 4: Дополнительные коридоры ===
   int extraCorridors = roomCount / 2;
   for (int attempt = 0; attempt < extraCorridors * 3 && extraCorridors > 0; attempt++) {
     int roomA = rand() % roomCount;
@@ -528,7 +549,6 @@ void generateDungeon() {
     }
   }
 
-  // Ставим игрока в центр первой комнаты
   playerX = (float)rooms[0].centerX;
   playerZ = (float)rooms[0].centerZ;
 }
@@ -537,7 +557,9 @@ void generateDungeon() {
 void updateCamera(Camera3D *camera) {
   int gridX = (int)roundf(playerX);
   int gridZ = (int)roundf(playerZ);
-  float groundY = (float)heightMap[gridX][gridZ] * FLOOR_HEIGHT;
+
+  // ИСПРАВЛЕНО: heightMap уже содержит высоту (3 или 7), умножать не нужно
+  float groundY = (float)heightMap[gridX][gridZ];
 
   camera->target = (Vector3){ playerX, groundY + 0.5f, playerZ };
   camera->position = (Vector3){
@@ -545,7 +567,7 @@ void updateCamera(Camera3D *camera) {
     camera->target.y + CAMERA_HEIGHT,
     camera->target.z + CAMERA_RADIUS * sinf(cameraAngle)
   };
-  camera->fovy = cameraFovy;  // Применяем зум
+  camera->fovy = cameraFovy;
 }
 
 // ==================== ОБРАБОТКА ВВОДА ====================
@@ -615,15 +637,18 @@ void renderTiles() {
     for (int z = 0; z < MAP_HEIGHT; z++) {
       int tileType = heightMap[x][z];
       if (tileType > 0) {
-        float columnHeight = (tileType == TILE_WALL) ? WALL_HEIGHT : FLOOR_HEIGHT;
+        // ИСПРАВЛЕНО: высота тайла равна его числовому значению (3 или 7)
+        float columnHeight = (float)tileType;
         Vector3 size = { 1.0f, columnHeight, 1.0f };
         Vector3 pos = { (float)x, columnHeight / 2.0f, (float)z };
 
         Color tileColor;
         if (tileType == TILE_WALL) {
-          tileColor = (Color){ 60, 60, 70, 255 };
+          tileColor = (Color){ 50, 50, 55, 255 };       // Тёмные стены
+        } else if (wallZone[x][z]) {
+          tileColor = (Color){ 100, 100, 105, 255 };    // Серый камень (здание)
         } else {
-          tileColor = (Color){ 120, 110, 100, 255 };
+          tileColor = (Color){ 130, 95, 60, 255 };      // Коричневое дерево (мост)
         }
 
         DrawCubeV(pos, size, tileColor);
@@ -639,7 +664,9 @@ void renderPath() {
 
   for (int i = currentPath.currentIndex; i < currentPath.length; i++) {
     Point p = currentPath.path[i];
-    float tileY = (float)heightMap[p.x][p.z] * FLOOR_HEIGHT + 0.1f;
+
+    // ИСПРАВЛЕНО: heightMap уже содержит высоту
+    float tileY = (float)heightMap[p.x][p.z] + 0.1f;
     Vector3 pathPos = {(float)p.x, tileY, (float)p.z};
     DrawCubeV(pathPos, (Vector3){0.3f, 0.05f, 0.3f}, YELLOW);
   }
@@ -649,7 +676,9 @@ void renderPath() {
 void renderPlayerShadow() {
   int gridX = (int)roundf(playerX);
   int gridZ = (int)roundf(playerZ);
-  float groundY = (float)heightMap[gridX][gridZ] * FLOOR_HEIGHT;
+
+  // ИСПРАВЛЕНО
+  float groundY = (float)heightMap[gridX][gridZ];
 
   Vector3 shadowPos = { playerX, groundY + 0.01f, playerZ };
   DrawCircle3D(shadowPos, 0.35f, (Vector3){1, 0, 0}, 90.0f, (Color){0, 0, 0, 100});
@@ -659,7 +688,9 @@ void renderPlayerShadow() {
 void renderPlayerSprite(Camera3D camera) {
   int gridX = (int)roundf(playerX);
   int gridZ = (int)roundf(playerZ);
-  float groundY = (float)heightMap[gridX][gridZ] * FLOOR_HEIGHT;
+
+  // ИСПРАВЛЕНО
+  float groundY = (float)heightMap[gridX][gridZ];
 
   float spriteY = groundY + 0.8f;
   Vector3 playerPos3D = { playerX, spriteY, playerZ };
