@@ -1,28 +1,30 @@
 #define ENET_IMPLEMENTATION
 #include "enet.h"
 #include "raylib.h"
+#include "raymath.h"
 #include <stdio.h>
 #include <math.h>
 #include <stdlib.h>
+#include <stdbool.h>
 
 // ==================== КОНСТАНТЫ КАРТЫ ====================
 #define MAP_WIDTH 12
 #define MAP_HEIGHT 12
-#define TILE_HEIGHT 0.2f
 #define HEIGHT_STEP 1.0f
-#define MAX_HEIGHT_DIFF 1  // Максимальная разница высот для проходимости
+#define MAX_HEIGHT_DIFF 1
+#define MAX_PATH_LENGTH 100
 
 // ==================== КОНСТАНТЫ КАМЕРЫ ====================
 #define CAMERA_RADIUS 14.0f
 #define CAMERA_HEIGHT 12.0f
-#define CAMERA_INITIAL_ANGLE (PI / 4.0f)  // 45 градусов - стандартная изометрия
-#define CAMERA_ROTATION_STEP (PI / 4.0f)  // Поворот на 45 градусов
+#define CAMERA_INITIAL_ANGLE (PI / 4.0f)
+#define CAMERA_ROTATION_STEP (PI / 4.0f)
 #define CAMERA_FOVY 8.0f
 
 // ==================== КОНСТАНТЫ ИГРОКА ====================
 #define PLAYER_START_X 6.0f
 #define PLAYER_START_Z 6.0f
-#define PLAYER_MOVE_SPEED 8.0f
+#define PLAYER_MOVE_SPEED 4.0f
 #define PLAYER_SPRITE_WIDTH 48
 #define PLAYER_SPRITE_HEIGHT 64
 
@@ -36,7 +38,7 @@ typedef enum {
   DIR_DOWN_LEFT,
   DIR_LEFT,
   DIR_UP_LEFT,
-  DIR_COUNT  // = 8, используется для модульной арифметики
+  DIR_COUNT
 } Direction;
 
 typedef struct {
@@ -44,23 +46,185 @@ typedef struct {
   int dz;
 } Dir2D;
 
-// Базовые направления для стандартной изометрии (камера на 45°)
-// При угле 45° камера находится в +X,+Z и смотрит на игрока
 Dir2D baseDirections[DIR_COUNT] = {
-  {-1, -1},  // DIR_UP: "вверх по экрану" = в дальний угол
-  { 0, -1},  // DIR_UP_RIGHT: вправо-вверх
-  { 1, -1},  // DIR_RIGHT: "вправо по экрану"
-  { 1,  0},  // DIR_DOWN_RIGHT: вправо-вниз
-  { 1,  1},  // DIR_DOWN: "вниз по экрану" = в ближний угол
-  { 0,  1},  // DIR_DOWN_LEFT: влево-вниз
-  {-1,  1},  // DIR_LEFT: "влево по экрану"
-  {-1,  0}   // DIR_UP_LEFT: влево-вверх
+  {-1, -1}, { 0, -1}, { 1, -1}, { 1,  0},
+  { 1,  1}, { 0,  1}, {-1,  1}, {-1,  0}
 };
 
+// ==================== СТРУКТУРЫ ДЛЯ A* ====================
+typedef struct {
+  int x;
+  int z;
+} Point;
+
+typedef struct {
+  Point point;
+  float g;
+  float h;
+  float f;
+} AStarNode;
+
+typedef struct {
+  Point path[MAX_PATH_LENGTH];
+  int length;
+  int currentIndex;
+} Path;
+
+// ==================== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ====================
+int heightMap[MAP_WIDTH][MAP_HEIGHT] = {0};
+Path currentPath = {0};
+bool isMoving = false;
+
 // ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-// Безопасный оператор остатка для отрицательных чисел
-int safeMod(int a, int b) {
-  return ((a % b) + b) % b;
+float heuristic(Point a, Point b) {
+  int dx = abs(a.x - b.x);
+  int dz = abs(a.z - b.z);
+  return (float)(dx + dz);
+}
+
+bool isWalkable(int x, int z, int fromHeight) {
+  if (x < 0 || x >= MAP_WIDTH || z < 0 || z >= MAP_HEIGHT) return false;
+  if (heightMap[x][z] == 0) return false;
+  if (abs(heightMap[x][z] - fromHeight) > MAX_HEIGHT_DIFF) return false;
+  return true;
+}
+
+// A* алгоритм (исправленная версия)
+Path findPath(Point start, Point goal) {
+  Path path = {0};
+
+  // Массив стоимости от старта
+  float gScore[MAP_WIDTH][MAP_HEIGHT];
+  for (int x = 0; x < MAP_WIDTH; x++) {
+    for (int z = 0; z < MAP_HEIGHT; z++) {
+      gScore[x][z] = 999999.0f;
+    }
+  }
+  gScore[start.x][start.z] = 0.0f;
+
+  // Массив для хранения родителя
+  Point cameFrom[MAP_WIDTH][MAP_HEIGHT];
+  for (int x = 0; x < MAP_WIDTH; x++) {
+    for (int z = 0; z < MAP_HEIGHT; z++) {
+      cameFrom[x][z] = (Point){-1, -1};
+    }
+  }
+
+  // Открытый список
+  AStarNode openList[MAP_WIDTH * MAP_HEIGHT];
+  int openCount = 0;
+
+  // Закрытый список
+  bool closedList[MAP_WIDTH][MAP_HEIGHT] = {false};
+
+  // Добавляем стартовую точку
+  AStarNode startNode = {start, 0.0f, heuristic(start, goal), 0.0f};
+  startNode.f = startNode.g + startNode.h;
+  openList[openCount++] = startNode;
+
+  while (openCount > 0) {
+    // Находим узел с наименьшим F
+    int currentIndex = 0;
+    for (int i = 1; i < openCount; i++) {
+      if (openList[i].f < openList[currentIndex].f) {
+        currentIndex = i;
+      }
+    }
+
+    AStarNode current = openList[currentIndex];
+
+    // Достигли цели
+    if (current.point.x == goal.x && current.point.z == goal.z) {
+      // Восстанавливаем путь
+      Point tempPath[MAX_PATH_LENGTH];
+      int tempLength = 0;
+
+      Point p = current.point;
+      while (!(p.x == start.x && p.z == start.z) && tempLength < MAX_PATH_LENGTH) {
+        tempPath[tempLength++] = p;
+        p = cameFrom[p.x][p.z];
+        if (p.x == -1) break;  // Защита от бесконечного цикла
+      }
+
+      // Инвертируем путь
+      path.length = tempLength;
+      for (int i = 0; i < tempLength; i++) {
+        path.path[i] = tempPath[tempLength - 1 - i];
+      }
+
+      return path;
+    }
+
+    // Перемещаем в закрытый список
+    openList[currentIndex] = openList[--openCount];
+    closedList[current.point.x][current.point.z] = true;
+
+    // Проверяем соседей
+    for (int dir = 0; dir < DIR_COUNT; dir++) {
+      Point neighbor = {
+        current.point.x + baseDirections[dir].dx,
+        current.point.z + baseDirections[dir].dz
+      };
+
+      if (!isWalkable(neighbor.x, neighbor.z, heightMap[current.point.x][current.point.z])) {
+        continue;
+      }
+
+      if (closedList[neighbor.x][neighbor.z]) {
+        continue;
+      }
+
+      float tentativeG = current.g + 1.0f;
+
+      if (tentativeG < gScore[neighbor.x][neighbor.z]) {
+        cameFrom[neighbor.x][neighbor.z] = current.point;
+        gScore[neighbor.x][neighbor.z] = tentativeG;
+
+        // Проверяем, есть ли уже в открытом списке
+        bool inOpen = false;
+        for (int i = 0; i < openCount; i++) {
+          if (openList[i].point.x == neighbor.x && openList[i].point.z == neighbor.z) {
+            openList[i].g = tentativeG;
+            openList[i].f = tentativeG + openList[i].h;
+            inOpen = true;
+            break;
+          }
+        }
+
+        if (!inOpen) {
+          AStarNode newNode = {neighbor, tentativeG, heuristic(neighbor, goal), 0.0f};
+          newNode.f = newNode.g + newNode.h;
+          openList[openCount++] = newNode;
+        }
+      }
+    }
+  }
+
+  return path;
+}
+
+Point screenToGrid(Vector2 screenPos, Camera3D camera) {
+  Point result = {-1, -1};
+  float minDist = 50.0f;
+
+  for (int x = 0; x < MAP_WIDTH; x++) {
+    for (int z = 0; z < MAP_HEIGHT; z++) {
+      if (heightMap[x][z] == 0) continue;
+
+      float tileY = (float)heightMap[x][z] * HEIGHT_STEP;
+      Vector3 tilePos = {(float)x, tileY, (float)z};
+      Vector2 tileScreen = GetWorldToScreen(tilePos, camera);
+
+      float dist = Vector2Distance(screenPos, tileScreen);
+      if (dist < minDist) {
+        minDist = dist;
+        result.x = x;
+        result.z = z;
+      }
+    }
+  }
+
+  return result;
 }
 
 int main(void)
@@ -70,43 +234,37 @@ int main(void)
     return 1;
   }
 
-  InitWindow(1600, 900, "Isometric Pixel Dungeon - Relative Movement");
+  InitWindow(1600, 900, "Isometric Pixel Dungeon - A* Pathfinding");
   SetTargetFPS(60);
 
-  float cameraAngle = CAMERA_INITIAL_ANGLE; 
+  float cameraAngle = CAMERA_INITIAL_ANGLE;
 
   Camera3D camera = {0};
   camera.up = (Vector3){ 0.0f, 1.0f, 0.0f };
-  camera.fovy = CAMERA_FOVY; 
-  camera.projection = CAMERA_ORTHOGRAPHIC; 
+  camera.fovy = CAMERA_FOVY;
+  camera.projection = CAMERA_ORTHOGRAPHIC;
 
-  // Генерация тестовой карты высот
-  int heightMap[MAP_WIDTH][MAP_HEIGHT] = {0};
   for (int x = 0; x < MAP_WIDTH; x++) {
     for (int z = 0; z < MAP_HEIGHT; z++) {
       int distX = abs(x - 6);
       int distZ = abs(z - 6);
       int h = 4 - (distX + distZ) / 2;
-      if (h < 0) h = 0; 
-      if (h > 4) h = 4; 
+      if (h < 0) h = 0;
+      if (h > 4) h = 4;
 
-      if (x == 3 && z == 3) h = 1; 
-      if (x == 8 && z == 8) h = 4; 
+      if (x == 3 && z == 3) h = 1;
+      if (x == 8 && z == 8) h = 4;
 
       heightMap[x][z] = h;
     }
   }
 
-  float targetX = PLAYER_START_X; 
-  float targetZ = PLAYER_START_Z;
   float playerX = PLAYER_START_X;
   float playerZ = PLAYER_START_Z;
 
-  while (!WindowShouldClose())
-  {
+  while (!WindowShouldClose()) {
     float dt = GetFrameTime();
 
-    // Дискретный поворот камеры
     if (IsKeyPressed(KEY_Q)) {
       cameraAngle -= CAMERA_ROTATION_STEP;
     }
@@ -114,64 +272,41 @@ int main(void)
       cameraAngle += CAMERA_ROTATION_STEP;
     }
 
-    // Обработка движения
-    Direction dirIndex = -1;
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+      Vector2 mousePos = GetMousePosition();
+      Point target = screenToGrid(mousePos, camera);
 
-    // Диагонали (проверяем первыми)
-    if (IsKeyPressed(KEY_W) && IsKeyPressed(KEY_A))      dirIndex = DIR_UP_LEFT;
-    else if (IsKeyPressed(KEY_W) && IsKeyPressed(KEY_D)) dirIndex = DIR_UP_RIGHT;
-    else if (IsKeyPressed(KEY_S) && IsKeyPressed(KEY_A)) dirIndex = DIR_DOWN_LEFT;
-    else if (IsKeyPressed(KEY_S) && IsKeyPressed(KEY_D)) dirIndex = DIR_DOWN_RIGHT;
-    // Основные направления
-    else if (IsKeyPressed(KEY_W)) dirIndex = DIR_UP;
-    else if (IsKeyPressed(KEY_D)) dirIndex = DIR_RIGHT;
-    else if (IsKeyPressed(KEY_S)) dirIndex = DIR_DOWN;
-    else if (IsKeyPressed(KEY_A)) dirIndex = DIR_LEFT;
-
-    if (dirIndex != -1) {
-      // Вычисляем, насколько повернута камера относительно базового угла
-      int rotationSteps = (int)roundf((cameraAngle - CAMERA_INITIAL_ANGLE) / CAMERA_ROTATION_STEP);
-      rotationSteps = safeMod(rotationSteps, DIR_COUNT);
-
-      // Применяем поворот к направлению
-      Direction worldDir = safeMod(dirIndex - rotationSteps, DIR_COUNT);
-
-      targetX += baseDirections[worldDir].dx;
-      targetZ += baseDirections[worldDir].dz;
+      if (target.x >= 0 && target.z >= 0) {
+        Point start = {(int)roundf(playerX), (int)roundf(playerZ)};
+        currentPath = findPath(start, target);
+        currentPath.currentIndex = 0;
+        isMoving = (currentPath.length > 0);
+      }
     }
 
-    // Проверка коллизий
-    int intTargetX = (int)roundf(targetX);
-    int intTargetZ = (int)roundf(targetZ);
-    int currentPlayerX = (int)roundf(playerX);
-    int currentPlayerZ = (int)roundf(playerZ);
+    if (isMoving && currentPath.currentIndex < currentPath.length) {
+      Point nextPoint = currentPath.path[currentPath.currentIndex];
+      float targetX = (float)nextPoint.x;
+      float targetZ = (float)nextPoint.z;
 
-    if (intTargetX < 0 || intTargetX >= MAP_WIDTH || 
-        intTargetZ < 0 || intTargetZ >= MAP_HEIGHT) {
-      targetX = playerX; 
-      targetZ = playerZ;
-    } 
-    else if (heightMap[intTargetX][intTargetZ] == 0) {
-      targetX = playerX; 
-      targetZ = playerZ;
+      float step = PLAYER_MOVE_SPEED * dt;
+      float dx = targetX - playerX;
+      float dz = targetZ - playerZ;
+
+      if (fabsf(dx) > 0.01f) playerX += (dx > 0 ? 1.0f : -1.0f) * fminf(step, fabsf(dx));
+      else playerX = targetX;
+
+      if (fabsf(dz) > 0.01f) playerZ += (dz > 0 ? 1.0f : -1.0f) * fminf(step, fabsf(dz));
+      else playerZ = targetZ;
+
+      if (fabsf(playerX - targetX) < 0.01f && fabsf(playerZ - targetZ) < 0.01f) {
+        currentPath.currentIndex++;
+        if (currentPath.currentIndex >= currentPath.length) {
+          isMoving = false;
+        }
+      }
     }
-    else if (abs(heightMap[intTargetX][intTargetZ] - heightMap[currentPlayerX][currentPlayerZ]) > MAX_HEIGHT_DIFF) {
-      targetX = playerX; 
-      targetZ = playerZ;
-    }
 
-    // Плавная интерполяция
-    float step = PLAYER_MOVE_SPEED * dt;
-    float dx = targetX - playerX;
-    float dz = targetZ - playerZ;
-
-    if (fabsf(dx) > 0.01f) playerX += (dx > 0 ? 1.0f : -1.0f) * fminf(step, fabsf(dx));
-    else playerX = targetX;
-
-    if (fabsf(dz) > 0.01f) playerZ += (dz > 0 ? 1.0f : -1.0f) * fminf(step, fabsf(dz));
-    else playerZ = targetZ;
-
-    // Обновление камеры
     int gridX = (int)roundf(playerX);
     int gridZ = (int)roundf(playerZ);
     float groundY = (float)heightMap[gridX][gridZ] * HEIGHT_STEP;
@@ -183,9 +318,8 @@ int main(void)
       camera.target.z + CAMERA_RADIUS * sinf(cameraAngle)
     };
 
-    // DRAW
     BeginDrawing();
-    ClearBackground((Color){30, 30, 40, 255}); 
+    ClearBackground((Color){30, 30, 40, 255});
 
     BeginMode3D(camera);
 
@@ -193,39 +327,54 @@ int main(void)
       for (int z = 0; z < MAP_HEIGHT; z++) {
         int h = heightMap[x][z];
         if (h > 0) {
-          Vector3 pos = { (float)x, (float)h * HEIGHT_STEP, (float)z };
+          float columnHeight = (float)h * HEIGHT_STEP;
+          Vector3 size = { 1.0f, columnHeight, 1.0f };
+          Vector3 pos = { (float)x, columnHeight / 2.0f, (float)z };
+
           unsigned char brightness = 80 + h * 30;
           Color tileColor = { brightness, brightness, brightness + 20, 255 };
 
-          DrawCubeV(pos, (Vector3){1.0f, TILE_HEIGHT, 1.0f}, tileColor);
-          DrawCubeWiresV(pos, (Vector3){1.0f, TILE_HEIGHT, 1.0f}, DARKGRAY);
+          DrawCubeV(pos, size, tileColor);
+          DrawCubeWiresV(pos, size, DARKGRAY);
         }
       }
     }
 
-    float playerY = groundY + TILE_HEIGHT / 2.0f + 0.01f;
-    Vector3 shadowPos = { playerX, playerY, playerZ };
+    if (isMoving) {
+      for (int i = currentPath.currentIndex; i < currentPath.length; i++) {
+        Point p = currentPath.path[i];
+        float tileY = (float)heightMap[p.x][p.z] * HEIGHT_STEP + 0.1f;
+        Vector3 pathPos = {(float)p.x, tileY, (float)p.z};
+        DrawCubeV(pathPos, (Vector3){0.3f, 0.05f, 0.3f}, YELLOW);
+      }
+    }
+
+    Vector3 shadowPos = { playerX, groundY + 0.01f, playerZ };
     DrawCircle3D(shadowPos, 0.35f, (Vector3){1, 0, 0}, 90.0f, (Color){0, 0, 0, 100});
 
     EndMode3D();
 
-    float spriteY = groundY + TILE_HEIGHT + 0.8f;
+    float spriteY = groundY + 0.8f;
     Vector3 playerPos3D = { playerX, spriteY, playerZ };
     Vector2 screenPos = GetWorldToScreen(playerPos3D, camera);
 
-    DrawRectangle(screenPos.x - PLAYER_SPRITE_WIDTH/2, screenPos.y - PLAYER_SPRITE_HEIGHT, 
-        PLAYER_SPRITE_WIDTH, PLAYER_SPRITE_HEIGHT, RED);
+    DrawRectangle(screenPos.x - PLAYER_SPRITE_WIDTH/2, screenPos.y - PLAYER_SPRITE_HEIGHT,
+                  PLAYER_SPRITE_WIDTH, PLAYER_SPRITE_HEIGHT, RED);
     DrawRectangle(screenPos.x - 12, screenPos.y - PLAYER_SPRITE_HEIGHT + 15, 8, 8, WHITE);
     DrawRectangle(screenPos.x + 4, screenPos.y - PLAYER_SPRITE_HEIGHT + 15, 8, 8, WHITE);
-    DrawRectangleLines(screenPos.x - PLAYER_SPRITE_WIDTH/2, screenPos.y - PLAYER_SPRITE_HEIGHT, 
-        PLAYER_SPRITE_WIDTH, PLAYER_SPRITE_HEIGHT, BLACK);
+    DrawRectangleLines(screenPos.x - PLAYER_SPRITE_WIDTH/2, screenPos.y - PLAYER_SPRITE_HEIGHT,
+                      PLAYER_SPRITE_WIDTH, PLAYER_SPRITE_HEIGHT, BLACK);
 
     DrawFPS(10, 10);
-    DrawText("WASD: Move (Relative) | Q/E: Rotate 45°", 10, 30, 20, WHITE);
+    DrawText("Click to move | Q/E: Rotate Camera", 10, 30, 20, WHITE);
 
     char angleText[50];
     sprintf(angleText, "Camera Angle: %.0f°", cameraAngle * RAD2DEG);
     DrawText(angleText, 10, 55, 20, LIGHTGRAY);
+
+    char pathText[50];
+    sprintf(pathText, "Path length: %d", currentPath.length);
+    DrawText(pathText, 10, 80, 20, LIGHTGRAY);
 
     EndDrawing();
   }
