@@ -9,13 +9,21 @@
 #include <time.h>
 
 // ==================== КОНСТАНТЫ КАРТЫ ====================
-#define MAP_WIDTH 12
-#define MAP_HEIGHT 12
+#define MAP_WIDTH 40
+#define MAP_HEIGHT 40
 #define FLOOR_HEIGHT 1.0f
 #define WALL_HEIGHT 4.0f
 #define MAX_HEIGHT_DIFF 1
 #define MAX_PATH_LENGTH 100
 #define HEIGHT_STEP 1.0f
+
+// ==================== КОНСТАНТЫ ГЕНЕРАЦИИ ====================
+#define ROOM_GEN_MIN_SIZE 5
+#define ROOM_GEN_MAX_SIZE 11      // 5 + rand() % 7
+#define ROOM_GEN_COUNT 5          // Количество комнат
+#define ROOM_GEN_MAX_ATTEMPTS 20  // Попыток разместить комнату
+#define ROOM_GEN_PADDING 2        // Минимальный отступ между комнатами
+#define MAX_ROOMS 20
 
 // Типы тайлов
 #define TILE_EMPTY 0
@@ -27,7 +35,10 @@
 #define CAMERA_HEIGHT 16.0f
 #define CAMERA_INITIAL_ANGLE (PI / 4.0f)
 #define CAMERA_ROTATION_STEP (PI / 4.0f)
-#define CAMERA_FOVY 12.0f
+#define CAMERA_FOVY_INITIAL 12.0f
+#define CAMERA_FOVY_MIN 4.0f    // Максимальный зум (приближение)
+#define CAMERA_FOVY_MAX 40.0f   // Максимальное отдаление
+#define CAMERA_ZOOM_SPEED 1.0f  // Шаг зума за прокрутку
 
 // ==================== КОНСТАНТЫ ИГРОКА ====================
 #define PLAYER_START_X 6.0f
@@ -78,11 +89,21 @@ typedef struct {
   int currentIndex;
 } Path;
 
+typedef struct {
+  int x, z;          // Верхний левый угол
+  int width, height;
+  int centerX, centerZ;
+} Room;
+
+Room rooms[MAX_ROOMS];
+int roomCount = 0;
+
 // ==================== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ====================
 int heightMap[MAP_WIDTH][MAP_HEIGHT] = {0};
 Path currentPath = {0};
 bool isMoving = false;
 float cameraAngle = CAMERA_INITIAL_ANGLE;
+float cameraFovy = CAMERA_FOVY_INITIAL;  // Новая переменная
 float playerX = PLAYER_START_X;
 float playerZ = PLAYER_START_Z;
 
@@ -247,30 +268,128 @@ void initMap() {
   }
 }
 
-// ==================== ГЕНЕРАЦИЯ КОМНАТЫ ====================
-void generateRoom() {
-  initMap();
+// ==================== ПРОВЕРКА ПЕРЕСЕЧЕНИЯ КОМНАТ ====================
+bool roomOverlaps(Room newRoom) {
+  for (int i = 0; i < roomCount; i++) {
+    Room r = rooms[i];
+    // Проверяем пересечение с учетом отступа
+    if (newRoom.x - ROOM_GEN_PADDING < r.x + r.width &&
+        newRoom.x + newRoom.width + ROOM_GEN_PADDING > r.x &&
+        newRoom.z - ROOM_GEN_PADDING < r.z + r.height &&
+        newRoom.z + newRoom.height + ROOM_GEN_PADDING > r.z) {
+      return true;
+    }
+  }
+  return false;
+}
 
-  int roomWidth = 5 + rand() % 7;
-  int roomHeight = 5 + rand() % 7;
-
-  int startX = (MAP_WIDTH - roomWidth) / 2;
-  int startZ = (MAP_HEIGHT - roomHeight) / 2;
-
-  for (int x = startX; x < startX + roomWidth; x++) {
-    for (int z = startZ; z < startZ + roomHeight; z++) {
-      if (x == startX || x == startX + roomWidth - 1 ||
-          z == startZ || z == startZ + roomHeight - 1) {
-        heightMap[x][z] = TILE_WALL;
-      } else {
-        heightMap[x][z] = TILE_FLOOR;
+// ==================== СОЗДАНИЕ КОРИДОРА МЕЖДУ ДВУМЯ ТОЧКАМИ ====================
+void carveCorridor(int x1, int z1, int x2, int z2) {
+  if (rand() % 2 == 0) {
+    // Горизонтальный участок, потом вертикальный
+    for (int x = x1; x != x2; x += (x2 > x1) ? 1 : -1) {
+      if (x >= 0 && x < MAP_WIDTH && z1 >= 0 && z1 < MAP_HEIGHT) {
+        // Заменяем стену на пол (создаем проход)
+        if (heightMap[x][z1] == TILE_WALL || heightMap[x][z1] == TILE_EMPTY) {
+          heightMap[x][z1] = TILE_FLOOR;
+        }
+      }
+    }
+    for (int z = z1; z != z2; z += (z2 > z1) ? 1 : -1) {
+      if (x2 >= 0 && x2 < MAP_WIDTH && z >= 0 && z < MAP_HEIGHT) {
+        if (heightMap[x2][z] == TILE_WALL || heightMap[x2][z] == TILE_EMPTY) {
+          heightMap[x2][z] = TILE_FLOOR;
+        }
+      }
+    }
+  } else {
+    // Вертикальный участок, потом горизонтальный
+    for (int z = z1; z != z2; z += (z2 > z1) ? 1 : -1) {
+      if (x1 >= 0 && x1 < MAP_WIDTH && z >= 0 && z < MAP_HEIGHT) {
+        if (heightMap[x1][z] == TILE_WALL || heightMap[x1][z] == TILE_EMPTY) {
+          heightMap[x1][z] = TILE_FLOOR;
+        }
+      }
+    }
+    for (int x = x1; x != x2; x += (x2 > x1) ? 1 : -1) {
+      if (x >= 0 && x < MAP_WIDTH && z2 >= 0 && z2 < MAP_HEIGHT) {
+        if (heightMap[x][z2] == TILE_WALL || heightMap[x][z2] == TILE_EMPTY) {
+          heightMap[x][z2] = TILE_FLOOR;
+        }
       }
     }
   }
+  // Финальная клетка
+  if (x2 >= 0 && x2 < MAP_WIDTH && z2 >= 0 && z2 < MAP_HEIGHT) {
+    if (heightMap[x2][z2] == TILE_WALL || heightMap[x2][z2] == TILE_EMPTY) {
+      heightMap[x2][z2] = TILE_FLOOR;
+    }
+  }
+}
 
-  // Игрок появляется в центре комнаты на полу
-  playerX = startX + roomWidth / 2.0f;
-  playerZ = startZ + roomHeight / 2.0f;
+// ==================== ГЕНЕРАЦИЯ ПОДЗЕМЕЛЬЯ ====================
+void generateDungeon() {
+  initMap();
+  roomCount = 0;
+
+  // Генерируем комнаты
+  for (int i = 0; i < ROOM_GEN_COUNT; i++) {
+    Room newRoom;
+    newRoom.width = ROOM_GEN_MIN_SIZE + rand() % (ROOM_GEN_MAX_SIZE - ROOM_GEN_MIN_SIZE + 1);
+    newRoom.height = ROOM_GEN_MIN_SIZE + rand() % (ROOM_GEN_MAX_SIZE - ROOM_GEN_MIN_SIZE + 1);
+
+    // Проверяем, что комната помещается на карте
+    if (newRoom.width >= MAP_WIDTH - 4 || newRoom.height >= MAP_HEIGHT - 4) {
+      continue;
+    }
+
+    bool placed = false;
+    for (int attempt = 0; attempt < ROOM_GEN_MAX_ATTEMPTS; attempt++) {
+      newRoom.x = 1 + rand() % (MAP_WIDTH - newRoom.width - 2);
+      newRoom.z = 1 + rand() % (MAP_HEIGHT - newRoom.height - 2);
+      newRoom.centerX = newRoom.x + newRoom.width / 2;
+      newRoom.centerZ = newRoom.z + newRoom.height / 2;
+
+      if (!roomOverlaps(newRoom)) {
+        placed = true;
+        break;
+      }
+    }
+
+    if (placed) {
+      // Вырезаем комнату в карте
+      for (int x = newRoom.x; x < newRoom.x + newRoom.width; x++) {
+        for (int z = newRoom.z; z < newRoom.z + newRoom.height; z++) {
+          if (x < 0 || x >= MAP_WIDTH || z < 0 || z >= MAP_HEIGHT) continue;
+
+          if (x == newRoom.x || x == newRoom.x + newRoom.width - 1 ||
+              z == newRoom.z || z == newRoom.z + newRoom.height - 1) {
+            heightMap[x][z] = TILE_WALL;
+          } else {
+            heightMap[x][z] = TILE_FLOOR;
+          }
+        }
+      }
+      rooms[roomCount++] = newRoom;
+    }
+  }
+
+  // Соединяем комнаты коридорами
+  for (int i = 1; i < roomCount; i++) {
+    carveCorridor(
+      rooms[i - 1].centerX, rooms[i - 1].centerZ,
+      rooms[i].centerX, rooms[i].centerZ
+    );
+  }
+
+  // Ставим игрока в центр первой комнаты
+  if (roomCount > 0) {
+    playerX = (float)rooms[0].centerX;
+    playerZ = (float)rooms[0].centerZ;
+  } else {
+    playerX = MAP_WIDTH / 2.0f;
+    playerZ = MAP_HEIGHT / 2.0f;
+  }
 }
 
 // ==================== ОБНОВЛЕНИЕ КАМЕРЫ ====================
@@ -285,6 +404,7 @@ void updateCamera(Camera3D *camera) {
     camera->target.y + CAMERA_HEIGHT,
     camera->target.z + CAMERA_RADIUS * sinf(cameraAngle)
   };
+  camera->fovy = cameraFovy;  // Применяем зум
 }
 
 // ==================== ОБРАБОТКА ВВОДА ====================
@@ -294,6 +414,15 @@ void handleInput(Camera3D camera) {
   }
   if (IsKeyPressed(KEY_E)) {
     cameraAngle += CAMERA_ROTATION_STEP;
+  }
+
+  // Зум колесиком мыши
+  float wheel = GetMouseWheelMove();
+  if (wheel != 0.0f) {
+    cameraFovy -= wheel * CAMERA_ZOOM_SPEED;
+    // Ограничиваем диапазон
+    if (cameraFovy < CAMERA_FOVY_MIN) cameraFovy = CAMERA_FOVY_MIN;
+    if (cameraFovy > CAMERA_FOVY_MAX) cameraFovy = CAMERA_FOVY_MAX;
   }
 
   if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
@@ -433,10 +562,10 @@ int main(void)
 
   Camera3D camera = {0};
   camera.up = (Vector3){ 0.0f, 1.0f, 0.0f };
-  camera.fovy = CAMERA_FOVY;
+  camera.fovy = cameraFovy;
   camera.projection = CAMERA_ORTHOGRAPHIC;
 
-  generateRoom();
+  generateDungeon();
 
   while (!WindowShouldClose()) {
     handleInput(camera);
